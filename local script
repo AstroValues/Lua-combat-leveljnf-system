@@ -1,0 +1,150 @@
+-- LocalScript: Handles input and sends combat requests to server
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local player = Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+
+-- RemoteEvents
+local combatFolder = ReplicatedStorage:WaitForChild("CombatRemotes")
+local punchEvent = combatFolder:WaitForChild("Punch")
+local blockEvent = combatFolder:WaitForChild("Block")
+
+-- Config
+local COMBO_RESET_TIME = 1.5
+local ATTACK_COOLDOWN = 0.4
+local PUNCH_STAMINA_COST = 10
+local BLOCK_STAMINA_COST = 5 -- stamina drained per second while blocking
+
+-- Stamina (client-side display only, server handles real values)
+local MAX_STAMINA = 100
+local stamina = MAX_STAMINA
+local staminaRegen = 15 -- per second
+local isBlocking = false
+local canAttack = true
+local comboCount = 0
+local lastHitTime = 0
+
+-- UI Setup
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "StaminaGui"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = player.PlayerGui
+
+local staminaFrame = Instance.new("Frame")
+staminaFrame.Size = UDim2.new(0, 300, 0, 20)
+staminaFrame.Position = UDim2.new(0.5, -150, 0.9, 0)
+staminaFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+staminaFrame.BorderSizePixel = 0
+staminaFrame.Parent = screenGui
+
+local staminaBar = Instance.new("Frame")
+staminaBar.Size = UDim2.new(1, 0, 1, 0)
+staminaBar.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
+staminaBar.BorderSizePixel = 0
+staminaBar.Parent = staminaFrame
+
+local staminaLabel = Instance.new("TextLabel")
+staminaLabel.Size = UDim2.new(1, 0, 1, 0)
+staminaLabel.BackgroundTransparency = 1
+staminaLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+staminaLabel.TextScaled = true
+staminaLabel.Text = "Stamina: 100"
+staminaLabel.Parent = staminaFrame
+
+local blockLabel = Instance.new("TextLabel")
+blockLabel.Size = UDim2.new(0, 200, 0, 40)
+blockLabel.Position = UDim2.new(0.5, -100, 0.82, 0)
+blockLabel.BackgroundTransparency = 1
+blockLabel.TextColor3 = Color3.fromRGB(100, 180, 255)
+blockLabel.TextScaled = true
+blockLabel.Text = ""
+blockLabel.Parent = screenGui
+
+-- Update stamina bar UI
+local function updateStaminaUI()
+	local pct = stamina / MAX_STAMINA
+	staminaBar.Size = UDim2.new(pct, 0, 1, 0)
+	staminaLabel.Text = "Stamina: " .. math.floor(stamina)
+
+	if stamina < 30 then
+		staminaBar.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+	elseif stamina < 60 then
+		staminaBar.BackgroundColor3 = Color3.fromRGB(200, 200, 50)
+	else
+		staminaBar.BackgroundColor3 = Color3.fromRGB(50, 200, 50)
+	end
+end
+
+-- Stamina regen + block drain loop
+task.spawn(function()
+	while true do
+		task.wait(0.1)
+		if isBlocking then
+			stamina = math.max(0, stamina - BLOCK_STAMINA_COST * 0.1)
+			-- Force stop block if out of stamina
+			if stamina <= 0 then
+				isBlocking = false
+				blockEvent:FireServer(false)
+				blockLabel.Text = ""
+			end
+		else
+			stamina = math.min(MAX_STAMINA, stamina + staminaRegen * 0.1)
+		end
+		updateStaminaUI()
+	end
+end)
+
+-- M1 Attack
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		if not canAttack then return end
+		if isBlocking then return end
+		if humanoid.Health <= 0 then return end
+		if stamina < PUNCH_STAMINA_COST then
+			print("Not enough stamina to attack!")
+			return
+		end
+
+		local now = tick()
+		if now - lastHitTime > COMBO_RESET_TIME then
+			comboCount = 0
+		end
+
+		comboCount = math.min(comboCount + 1, 4)
+		lastHitTime = now
+		stamina = math.max(0, stamina - PUNCH_STAMINA_COST)
+		updateStaminaUI()
+
+		canAttack = false
+		punchEvent:FireServer(comboCount)
+
+		task.wait(ATTACK_COOLDOWN)
+		canAttack = true
+	end
+end)
+
+-- Block: Hold F to block
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+	if input.KeyCode == Enum.KeyCode.F then
+		if stamina <= 0 then return end
+		if humanoid.Health <= 0 then return end
+		isBlocking = true
+		blockLabel.Text = "🛡 Blocking"
+		blockEvent:FireServer(true)
+	end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+	if input.KeyCode == Enum.KeyCode.F then
+		isBlocking = false
+		blockLabel.Text = ""
+		blockEvent:FireServer(false)
+	end
+end)
