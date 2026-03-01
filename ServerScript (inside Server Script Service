@@ -1,0 +1,158 @@
+-- ServerScript: Handles damage, blocking, stamina, and knockback
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- Setup RemoteEvents
+local combatFolder = Instance.new("Folder")
+combatFolder.Name = "CombatRemotes"
+combatFolder.Parent = ReplicatedStorage
+
+local punchEvent = Instance.new("RemoteEvent")
+punchEvent.Name = "Punch"
+punchEvent.Parent = combatFolder
+
+local blockEvent = Instance.new("RemoteEvent")
+blockEvent.Name = "Block"
+blockEvent.Parent = combatFolder
+
+-- Config
+local PUNCH_DAMAGE = 10
+local COMBO_BONUS = 5
+local PUNCH_RANGE = 7
+local PUNCH_COOLDOWN = 0.3
+local KNOCKBACK_FORCE = 60
+local BLOCK_DAMAGE_REDUCTION = 0.75 -- 75% damage reduction while blocking
+local MAX_STAMINA = 100
+local PUNCH_STAMINA_COST = 10
+
+-- Player state tables
+local cooldowns = {}
+local blocking = {}
+local stamina = {}
+
+-- Init player state on join
+local function onPlayerAdded(player)
+	stamina[player] = MAX_STAMINA
+	blocking[player] = false
+end
+
+-- Cleanup on leave
+local function onPlayerRemoving(player)
+	cooldowns[player] = nil
+	blocking[player] = nil
+	stamina[player] = nil
+end
+
+Players.PlayerAdded:Connect(onPlayerAdded)
+Players.PlayerRemoving:Connect(onPlayerRemoving)
+
+for _, player in ipairs(Players:GetPlayers()) do
+	onPlayerAdded(player)
+end
+
+-- Stamina regen on server
+task.spawn(function()
+	while true do
+		task.wait(0.1)
+		for _, player in ipairs(Players:GetPlayers()) do
+			if not blocking[player] then
+				stamina[player] = math.min(MAX_STAMINA, (stamina[player] or MAX_STAMINA) + 15 * 0.1)
+			else
+				stamina[player] = math.max(0, (stamina[player] or 0) - 5 * 0.1)
+				if stamina[player] <= 0 then
+					blocking[player] = false
+				end
+			end
+		end
+	end
+end)
+
+-- Range-based hitbox
+local function getHitsInRange(character, range)
+	local hits = {}
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	if not rootPart then return hits end
+
+	for _, otherPlayer in ipairs(Players:GetPlayers()) do
+		local otherChar = otherPlayer.Character
+		if not otherChar or otherChar == character then continue end
+
+		local otherRoot = otherChar:FindFirstChild("HumanoidRootPart")
+		local otherHumanoid = otherChar:FindFirstChild("Humanoid")
+		if not otherRoot or not otherHumanoid then continue end
+		if otherHumanoid.Health <= 0 then continue end
+
+		local distance = (rootPart.Position - otherRoot.Position).Magnitude
+		if distance <= range then
+			table.insert(hits, {
+				player = otherPlayer,
+				character = otherChar,
+				humanoid = otherHumanoid,
+				root = otherRoot
+			})
+		end
+	end
+
+	return hits
+end
+
+-- Knockback
+local function applyKnockback(attackerRoot, targetRoot, force)
+	local direction = (targetRoot.Position - attackerRoot.Position).Unit
+	local attachment = Instance.new("Attachment")
+	local knockbackVelocity = Instance.new("LinearVelocity")
+
+	attachment.Parent = targetRoot
+	knockbackVelocity.Attachment0 = attachment
+	knockbackVelocity.VectorVelocity = (direction + Vector3.new(0, 0.3, 0)) * force
+	knockbackVelocity.MaxForce = math.huge
+	knockbackVelocity.Parent = targetRoot
+
+	task.delay(0.12, function()
+		knockbackVelocity:Destroy()
+		attachment:Destroy()
+	end)
+end
+
+-- Handle punch
+punchEvent.OnServerEvent:Connect(function(player, comboCount)
+	local character = player.Character
+	if not character then return end
+
+	local rootPart = character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character:FindFirstChild("Humanoid")
+	if not rootPart or not humanoid then return end
+	if humanoid.Health <= 0 then return end
+
+	-- Server cooldown
+	local now = tick()
+	if cooldowns[player] and now - cooldowns[player] < PUNCH_COOLDOWN then return end
+	cooldowns[player] = now
+
+	-- Stamina check
+	if (stamina[player] or 0) < PUNCH_STAMINA_COST then return end
+	stamina[player] = stamina[player] - PUNCH_STAMINA_COST
+
+	local damage = PUNCH_DAMAGE
+	if comboCount >= 4 then
+		damage = PUNCH_DAMAGE + COMBO_BONUS
+	end
+
+	local hits = getHitsInRange(character, PUNCH_RANGE)
+	for _, hit in ipairs(hits) do
+		local finalDamage = damage
+		-- Reduce damage if target is blocking
+		if blocking[hit.player] then
+			finalDamage = damage * (1 - BLOCK_DAMAGE_REDUCTION)
+		end
+		hit.humanoid:TakeDamage(finalDamage)
+		applyKnockback(rootPart, hit.root, blocking[hit.player] and KNOCKBACK_FORCE * 0.3 or KNOCKBACK_FORCE)
+	end
+end)
+
+-- Handle block
+blockEvent.OnServerEvent:Connect(function(player, isBlocking)
+	if blocking[player] == nil then return end
+	blocking[player] = isBlocking
+end)
