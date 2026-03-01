@@ -1,0 +1,550 @@
+–[[
+============================================================
+COMBAT & LEADERBOARD SYSTEM
+A full-featured Lua module for games with combat mechanics,
+player stats, XP progression, and a ranked leaderboard.
+============================================================
+]]
+
+– ============================================================
+– CONFIGURATION
+– ============================================================
+
+local Config = {
+MAX_LEVEL        = 50,
+BASE_XP          = 100,       – XP needed for level 2
+XP_SCALE         = 1.5,       – XP multiplier per level
+BASE_HP          = 100,
+HP_PER_LEVEL     = 20,
+BASE_ATK         = 15,
+ATK_PER_LEVEL    = 3,
+BASE_DEF         = 5,
+DEF_PER_LEVEL    = 2,
+CRIT_CHANCE      = 0.15,      – 15% base crit chance
+CRIT_MULTIPLIER  = 2.0,
+DODGE_CHANCE     = 0.08,      – 8% base dodge chance
+XP_KILL_BASE     = 50,
+XP_WIN_BONUS     = 25,
+LEADERBOARD_SIZE = 10,
+}
+
+– ============================================================
+– UTILITY FUNCTIONS
+– ============================================================
+
+local Utils = {}
+
+function Utils.round(n)
+return math.floor(n + 0.5)
+end
+
+function Utils.clamp(val, min, max)
+if val < min then return min end
+if val > max then return max end
+return val
+end
+
+function Utils.randomFloat(min, max)
+return min + math.random() * (max - min)
+end
+
+function Utils.formatNumber(n)
+local s = tostring(math.floor(n))
+local result = “”
+local count = 0
+for i = #s, 1, -1 do
+count = count + 1
+result = s:sub(i, i) .. result
+if count % 3 == 0 and i ~= 1 then
+result = “,” .. result
+end
+end
+return result
+end
+
+function Utils.tableLength(t)
+local count = 0
+for _ in pairs(t) do count = count + 1 end
+return count
+end
+
+function Utils.deepCopy(orig)
+local copy = {}
+for k, v in pairs(orig) do
+if type(v) == “table” then
+copy[k] = Utils.deepCopy(v)
+else
+copy[k] = v
+end
+end
+return copy
+end
+
+– ============================================================
+– XP / LEVELING SYSTEM
+– ============================================================
+
+local LevelSystem = {}
+
+function LevelSystem.xpForLevel(level)
+if level <= 1 then return 0 end
+return Utils.round(Config.BASE_XP * (Config.XP_SCALE ^ (level - 2)))
+end
+
+function LevelSystem.totalXpForLevel(level)
+local total = 0
+for i = 2, level do
+total = total + LevelSystem.xpForLevel(i)
+end
+return total
+end
+
+function LevelSystem.levelFromXp(xp)
+local level = 1
+while level < Config.MAX_LEVEL do
+local needed = LevelSystem.totalXpForLevel(level + 1)
+if xp >= needed then
+level = level + 1
+else
+break
+end
+end
+return level
+end
+
+function LevelSystem.xpToNextLevel(xp)
+local level = LevelSystem.levelFromXp(xp)
+if level >= Config.MAX_LEVEL then return 0 end
+local needed = LevelSystem.totalXpForLevel(level + 1)
+return needed - xp
+end
+
+– ============================================================
+– PLAYER CLASS
+– ============================================================
+
+local Player = {}
+Player.__index = Player
+
+function Player.new(name, class)
+local self = setmetatable({}, Player)
+self.name       = name or “Unknown”
+self.class      = class or “Warrior”
+self.xp         = 0
+self.level      = 1
+self.kills      = 0
+self.deaths     = 0
+self.wins       = 0
+self.losses     = 0
+self.damageDealt = 0
+self.damageTaken = 0
+self.score      = 0
+self.statusEffects = {}
+self:recalculateStats()
+self.hp         = self.maxHp
+return self
+end
+
+function Player:recalculateStats()
+self.level   = LevelSystem.levelFromXp(self.xp)
+self.maxHp   = Config.BASE_HP  + (self.level - 1) * Config.HP_PER_LEVEL
+self.attack  = Config.BASE_ATK + (self.level - 1) * Config.ATK_PER_LEVEL
+self.defense = Config.BASE_DEF + (self.level - 1) * Config.DEF_PER_LEVEL
+
+```
+-- Class-based modifiers
+if self.class == "Warrior" then
+    self.maxHp   = Utils.round(self.maxHp * 1.2)
+    self.defense = Utils.round(self.defense * 1.1)
+elseif self.class == "Mage" then
+    self.attack  = Utils.round(self.attack * 1.35)
+    self.maxHp   = Utils.round(self.maxHp  * 0.85)
+elseif self.class == "Rogue" then
+    self.critChance = (Config.CRIT_CHANCE + 0.10)
+    self.dodgeChance = (Config.DODGE_CHANCE + 0.10)
+elseif self.class == "Paladin" then
+    self.maxHp   = Utils.round(self.maxHp * 1.1)
+    self.defense = Utils.round(self.defense * 1.2)
+    self.attack  = Utils.round(self.attack * 0.9)
+end
+
+self.critChance  = self.critChance  or Config.CRIT_CHANCE
+self.dodgeChance = self.dodgeChance or Config.DODGE_CHANCE
+self.hp          = math.min(self.hp or self.maxHp, self.maxHp)
+```
+
+end
+
+function Player:isAlive()
+return self.hp > 0
+end
+
+function Player:heal(amount)
+local prev = self.hp
+self.hp = Utils.clamp(self.hp + amount, 0, self.maxHp)
+return self.hp - prev
+end
+
+function Player:fullHeal()
+self.hp = self.maxHp
+end
+
+function Player:addXp(amount)
+local prevLevel = self.level
+self.xp = self.xp + amount
+self:recalculateStats()
+if self.level > prevLevel then
+return true, self.level  – leveled up
+end
+return false, self.level
+end
+
+function Player:applyStatusEffect(effect)
+self.statusEffects[effect.name] = {
+duration = effect.duration,
+value    = effect.value,
+type     = effect.type,
+}
+end
+
+function Player:tickStatusEffects()
+local messages = {}
+for name, effect in pairs(self.statusEffects) do
+if effect.type == “dot” then
+self.hp = math.max(0, self.hp - effect.value)
+table.insert(messages, self.name .. “ takes “ .. effect.value .. “ “ .. name .. “ damage!”)
+elseif effect.type == “hot” then
+local healed = self:heal(effect.value)
+table.insert(messages, self.name .. “ regenerates “ .. healed .. “ HP from “ .. name .. “!”)
+end
+effect.duration = effect.duration - 1
+if effect.duration <= 0 then
+self.statusEffects[name] = nil
+table.insert(messages, name .. “ fades from “ .. self.name .. “.”)
+end
+end
+return messages
+end
+
+function Player:getKdRatio()
+if self.deaths == 0 then
+return self.kills > 0 and self.kills or 0
+end
+return string.format(”%.2f”, self.kills / self.deaths)
+end
+
+function Player:getSummary()
+local lines = {
+string.rep(“─”, 40),
+string.format(”  %s  [%s]  Level %d”, self.name, self.class, self.level),
+string.rep(“─”, 40),
+string.format(”  HP:     %d / %d”, self.hp, self.maxHp),
+string.format(”  ATK:    %d   DEF: %d”, self.attack, self.defense),
+string.format(”  Crit:   %.0f%%  Dodge: %.0f%%”, self.critChance * 100, self.dodgeChance * 100),
+string.format(”  XP:     %s  (Next: %s)”, Utils.formatNumber(self.xp), Utils.formatNumber(LevelSystem.xpToNextLevel(self.xp))),
+string.format(”  Score:  %s”, Utils.formatNumber(self.score)),
+string.format(”  K/D:    %s  (%d kills / %d deaths)”, self:getKdRatio(), self.kills, self.deaths),
+string.format(”  Wins:   %d  Losses: %d”, self.wins, self.losses),
+string.rep(“─”, 40),
+}
+return table.concat(lines, “\n”)
+end
+
+– ============================================================
+– COMBAT ENGINE
+– ============================================================
+
+local Combat = {}
+
+function Combat.calculateDamage(attacker, defender)
+local base    = attacker.attack
+local reduced = math.max(1, base - math.floor(defender.defense * 0.5))
+local variance = Utils.randomFloat(0.85, 1.15)
+local damage  = Utils.round(reduced * variance)
+
+```
+local isCrit  = math.random() < attacker.critChance
+local isDodge = math.random() < defender.dodgeChance
+
+if isDodge then
+    return 0, false, true
+end
+if isCrit then
+    damage = Utils.round(damage * Config.CRIT_MULTIPLIER)
+end
+return math.max(1, damage), isCrit, false
+```
+
+end
+
+function Combat.attack(attacker, defender)
+local damage, isCrit, isDodge = Combat.calculateDamage(attacker, defender)
+local log = “”
+
+```
+if isDodge then
+    log = string.format("  %s dodges %s's attack!", defender.name, attacker.name)
+else
+    defender.hp = math.max(0, defender.hp - damage)
+    attacker.damageDealt = attacker.damageDealt + damage
+    defender.damageTaken = defender.damageTaken + damage
+
+    if isCrit then
+        log = string.format("  ★ CRITICAL! %s hits %s for %d damage! (HP: %d/%d)",
+            attacker.name, defender.name, damage, defender.hp, defender.maxHp)
+    else
+        log = string.format("  %s hits %s for %d damage. (HP: %d/%d)",
+            attacker.name, defender.name, damage, defender.hp, defender.maxHp)
+    end
+end
+
+return damage, log
+```
+
+end
+
+function Combat.duel(playerA, playerB, maxRounds)
+maxRounds = maxRounds or 30
+local log  = {}
+local round = 0
+
+```
+playerA:fullHeal()
+playerB:fullHeal()
+
+table.insert(log, string.rep("═", 45))
+table.insert(log, string.format("  DUEL: %s  vs  %s", playerA.name, playerB.name))
+table.insert(log, string.format("  %s HP: %d  |  %s HP: %d", playerA.name, playerA.maxHp, playerB.name, playerB.maxHp))
+table.insert(log, string.rep("═", 45))
+
+while playerA:isAlive() and playerB:isAlive() and round < maxRounds do
+    round = round + 1
+    table.insert(log, string.format("\n  [ Round %d ]", round))
+
+    -- Tick status effects
+    for _, msg in ipairs(playerA:tickStatusEffects()) do table.insert(log, msg) end
+    for _, msg in ipairs(playerB:tickStatusEffects()) do table.insert(log, msg) end
+
+    if not playerA:isAlive() or not playerB:isAlive() then break end
+
+    -- Player A attacks B
+    local _, atkLog = Combat.attack(playerA, playerB)
+    table.insert(log, atkLog)
+
+    if not playerB:isAlive() then break end
+
+    -- Player B attacks A
+    local _, defLog = Combat.attack(playerB, playerA)
+    table.insert(log, defLog)
+end
+
+-- Determine winner
+local winner, loser
+if playerA:isAlive() and not playerB:isAlive() then
+    winner, loser = playerA, playerB
+elseif playerB:isAlive() and not playerA:isAlive() then
+    winner, loser = playerB, playerA
+else
+    -- Draw — higher HP percentage wins
+    local aRatio = playerA.hp / playerA.maxHp
+    local bRatio = playerB.hp / playerB.maxHp
+    if aRatio >= bRatio then
+        winner, loser = playerA, playerB
+    else
+        winner, loser = playerB, playerA
+    end
+    table.insert(log, "\n  Max rounds reached — closest HP wins!")
+end
+
+-- Update stats
+winner.kills  = winner.kills  + 1
+winner.wins   = winner.wins   + 1
+loser.deaths  = loser.deaths  + 1
+loser.losses  = loser.losses  + 1
+
+local xpGain = Config.XP_KILL_BASE + Config.XP_WIN_BONUS +
+               (loser.level * 10)
+local leveled, newLevel = winner:addXp(xpGain)
+loser:addXp(Utils.round(xpGain * 0.3))
+
+-- Score update
+winner.score = winner.score + (xpGain * 2)
+
+table.insert(log, "\n" .. string.rep("═", 45))
+table.insert(log, string.format("  🏆 WINNER: %s!", winner.name))
+table.insert(log, string.format("  +%s XP awarded!", Utils.formatNumber(xpGain)))
+if leveled then
+    table.insert(log, string.format("  ⬆  LEVEL UP! %s is now level %d!", winner.name, newLevel))
+end
+table.insert(log, string.rep("═", 45))
+
+return winner, loser, table.concat(log, "\n")
+```
+
+end
+
+– ============================================================
+– LEADERBOARD SYSTEM
+– ============================================================
+
+local Leaderboard = {}
+Leaderboard.__index = Leaderboard
+
+function Leaderboard.new()
+local self = setmetatable({}, Leaderboard)
+self.players = {}
+return self
+end
+
+function Leaderboard:register(player)
+self.players[player.name] = player
+end
+
+function Leaderboard:remove(name)
+self.players[name] = nil
+end
+
+function Leaderboard:getSorted(key, limit)
+key   = key   or “score”
+limit = limit or Config.LEADERBOARD_SIZE
+
+```
+local list = {}
+for _, p in pairs(self.players) do
+    table.insert(list, p)
+end
+
+table.sort(list, function(a, b)
+    return (a[key] or 0) > (b[key] or 0)
+end)
+
+local trimmed = {}
+for i = 1, math.min(limit, #list) do
+    trimmed[i] = list[i]
+end
+return trimmed
+```
+
+end
+
+function Leaderboard:display(key, limit)
+key   = key   or “score”
+limit = limit or Config.LEADERBOARD_SIZE
+local sorted = self:getSorted(key, limit)
+
+```
+local medals = { "🥇", "🥈", "🥉" }
+local lines  = {
+    string.rep("═", 60),
+    string.format("  🏆  LEADERBOARD  —  Sorted by: %s  (Top %d)", key:upper(), limit),
+    string.rep("═", 60),
+    string.format("  %-4s %-16s %-8s %-8s %-10s %-6s", "Rank", "Name", "Level", "Class", key:upper(), "K/D"),
+    string.rep("─", 60),
+}
+
+for i, p in ipairs(sorted) do
+    local rank   = medals[i] or string.format("  #%d", i)
+    local val    = Utils.formatNumber(p[key] or 0)
+    local kd     = p:getKdRatio()
+    table.insert(lines, string.format("  %-4s %-16s %-8d %-10s %-10s %-6s",
+        rank, p.name, p.level, p.class, val, kd))
+end
+
+table.insert(lines, string.rep("═", 60))
+return table.concat(lines, "\n")
+```
+
+end
+
+function Leaderboard:getPlayerRank(name, key)
+key = key or “score”
+local sorted = self:getSorted(key, Utils.tableLength(self.players))
+for i, p in ipairs(sorted) do
+if p.name == name then return i end
+end
+return nil
+end
+
+– ============================================================
+– DEMO / SIMULATION
+– ============================================================
+
+math.randomseed(os.time())
+
+print(”\n” .. string.rep(”=”, 60))
+print(”   COMBAT & LEADERBOARD SYSTEM — DEMO”)
+print(string.rep(”=”, 60) .. “\n”)
+
+– Create players
+local players = {
+Player.new(“Aragorn”,    “Warrior”),
+Player.new(“Gandalf”,    “Mage”),
+Player.new(“Legolas”,    “Rogue”),
+Player.new(“Boromir”,    “Paladin”),
+Player.new(“Saruman”,    “Mage”),
+Player.new(“Eowyn”,      “Warrior”),
+}
+
+– Manually set some XP to give variety
+players[1].xp = 1800
+players[2].xp = 3200
+players[3].xp = 2500
+players[4].xp = 900
+players[5].xp = 4100
+players[6].xp = 1200
+
+for _, p in ipairs(players) do p:recalculateStats() end
+
+– Setup leaderboard
+local board = Leaderboard.new()
+for _, p in ipairs(players) do board:register(p) end
+
+– Print initial player cards
+print(”=== PLAYER ROSTER ===\n”)
+for _, p in ipairs(players) do
+print(p:getSummary())
+end
+
+– Run some duels
+print(”\n=== COMBAT DUELS ===\n”)
+
+local matchups = {
+{players[1], players[5]},  – Aragorn vs Saruman
+{players[2], players[3]},  – Gandalf vs Legolas
+{players[4], players[6]},  – Boromir vs Eowyn
+{players[1], players[2]},  – Aragorn vs Gandalf (rematch)
+}
+
+for _, match in ipairs(matchups) do
+local winner, loser, combatLog = Combat.duel(match[1], match[2])
+print(combatLog)
+print()
+end
+
+– Display leaderboard by score
+print(board:display(“score”, 6))
+print()
+
+– Display leaderboard by kills
+print(board:display(“kills”, 6))
+print()
+
+– Display leaderboard by level
+print(board:display(“level”, 6))
+print()
+
+– Rank inquiry
+for _, p in ipairs(players) do
+local rank = board:getPlayerRank(p.name, “score”)
+print(string.format(”  %s is ranked #%d on the leaderboard.”, p.name, rank or 0))
+end
+
+print()
+
+– Updated player summaries
+print(”=== FINAL PLAYER STATS ===\n”)
+for _, p in ipairs(players) do
+print(p:getSummary())
+end
+
+print(”\nSimulation complete!”)
